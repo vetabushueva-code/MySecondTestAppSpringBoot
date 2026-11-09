@@ -17,6 +17,7 @@ import ru.bushuevavioletta.MySecondTestAppSpringBoot.model.ErrorCodes;
 import ru.bushuevavioletta.MySecondTestAppSpringBoot.model.ErrorMessages;
 import ru.bushuevavioletta.MySecondTestAppSpringBoot.model.Request;
 import ru.bushuevavioletta.MySecondTestAppSpringBoot.model.Response;
+import ru.bushuevavioletta.MySecondTestAppSpringBoot.service.ModifyRequestService;
 import ru.bushuevavioletta.MySecondTestAppSpringBoot.service.ModifyResponseService;
 import ru.bushuevavioletta.MySecondTestAppSpringBoot.service.ValidationService;
 import ru.bushuevavioletta.MySecondTestAppSpringBoot.util.DateTimeUtil;
@@ -29,18 +30,29 @@ public class MyController {
 
     private final ValidationService validationService;
     private final ModifyResponseService modifyResponseService;
+    private final ModifyRequestService modifySourceRequestService;
+    private final ModifyRequestService modifySystemNameRequestService;
 
     @Autowired
     public MyController(ValidationService validationService,
                         @Qualifier("ModifySystemTimeResponseService")
-                        ModifyResponseService modifyResponseService) {
+                        ModifyResponseService modifyResponseService,
+                        @Qualifier("ModifySourceRequestService")
+                        ModifyRequestService modifySourceRequestService,
+                        @Qualifier("ModifySystemNameRequestService")
+                        ModifyRequestService modifySystemNameRequestService) {
         this.validationService = validationService;
         this.modifyResponseService = modifyResponseService;
+        this.modifySourceRequestService = modifySourceRequestService;
+        this.modifySystemNameRequestService = modifySystemNameRequestService;
     }
 
     @PostMapping(value = "/feedback")
     public ResponseEntity<Response> feedback(@Valid @RequestBody Request request,
                                              BindingResult bindingResult) {
+
+        // Время получения request Сервисом 1 – нужно для замера времени до Сервиса 2
+        Date receivedTime = new Date();
 
         log.info("request: {}", request);
 
@@ -62,6 +74,14 @@ public class MyController {
             if ("123".equals(request.getUid())) {
                 throw new UnsupportedCodeException("uid = 123 не поддерживается");
             }
+
+            // Модифицируем request и пересылаем его в Сервис 2
+            request.setSystemTime(DateTimeUtil.getCustomFormat().format(receivedTime));
+            log.info("systemTime в request заменён на время получения Сервисом 1: {}",
+                    request.getSystemTime());
+            modifySourceRequestService.modify(request);
+            modifySystemNameRequestService.modify(request);
+
         } catch (ValidationFailedException e) {
             log.error("ValidationFailedException: {}", e.getMessage());
             response.setCode(Codes.FAILED);
