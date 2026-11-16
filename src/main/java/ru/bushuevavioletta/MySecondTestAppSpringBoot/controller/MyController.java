@@ -17,6 +17,7 @@ import ru.bushuevavioletta.MySecondTestAppSpringBoot.model.ErrorCodes;
 import ru.bushuevavioletta.MySecondTestAppSpringBoot.model.ErrorMessages;
 import ru.bushuevavioletta.MySecondTestAppSpringBoot.model.Request;
 import ru.bushuevavioletta.MySecondTestAppSpringBoot.model.Response;
+import ru.bushuevavioletta.MySecondTestAppSpringBoot.service.AnnualBonusService;
 import ru.bushuevavioletta.MySecondTestAppSpringBoot.service.ModifyRequestService;
 import ru.bushuevavioletta.MySecondTestAppSpringBoot.service.ModifyResponseService;
 import ru.bushuevavioletta.MySecondTestAppSpringBoot.service.ValidationService;
@@ -32,6 +33,7 @@ public class MyController {
     private final ModifyResponseService modifyResponseService;
     private final ModifyRequestService modifySourceRequestService;
     private final ModifyRequestService modifySystemNameRequestService;
+    private final AnnualBonusService annualBonusService;
 
     @Autowired
     public MyController(ValidationService validationService,
@@ -40,22 +42,49 @@ public class MyController {
                         @Qualifier("ModifySourceRequestService")
                         ModifyRequestService modifySourceRequestService,
                         @Qualifier("ModifySystemNameRequestService")
-                        ModifyRequestService modifySystemNameRequestService) {
+                        ModifyRequestService modifySystemNameRequestService,
+                        AnnualBonusService annualBonusService) {
         this.validationService = validationService;
         this.modifyResponseService = modifyResponseService;
         this.modifySourceRequestService = modifySourceRequestService;
         this.modifySystemNameRequestService = modifySystemNameRequestService;
+        this.annualBonusService = annualBonusService;
     }
 
     @PostMapping(value = "/feedback")
     public ResponseEntity<Response> feedback(@Valid @RequestBody Request request,
                                              BindingResult bindingResult) {
 
-        // Время получения request Сервисом 1 – нужно для замера времени до Сервиса 2
         Date receivedTime = new Date();
-
         log.info("request: {}", request);
 
+        Response response = buildResponse(request);
+
+        try {
+            validationService.isValid(bindingResult);
+            if ("123".equals(request.getUid())) {
+                throw new UnsupportedCodeException("uid = 123 не поддерживается");
+            }
+            calculateBonuses(request, response);
+            forwardToService2(request, receivedTime);
+        } catch (ValidationFailedException e) {
+            return error(response, ErrorCodes.VALIDATION_EXCEPTION, ErrorMessages.VALIDATION,
+                    HttpStatus.BAD_REQUEST, e);
+        } catch (UnsupportedCodeException e) {
+            return error(response, ErrorCodes.UNSUPPORTED_EXCEPTION, ErrorMessages.UNSUPPORTED,
+                    HttpStatus.BAD_REQUEST, e);
+        } catch (Exception e) {
+            return error(response, ErrorCodes.UNKNOWN_EXCEPTION, ErrorMessages.UNKNOWN,
+                    HttpStatus.INTERNAL_SERVER_ERROR, e);
+        }
+
+        modifyResponseService.modify(response);
+        log.info("Итоговый response: {}", response);
+        return new ResponseEntity<>(response, HttpStatus.OK);
+    }
+
+    // Начальный ответ: success и пустые коды ошибок
+    private Response buildResponse(Request request) {
         Response response = Response.builder()
                 .uid(request.getUid())
                 .operationUid(request.getOperationUid())
@@ -64,50 +93,43 @@ public class MyController {
                 .errorCode(ErrorCodes.EMPTY)
                 .errorMessage(ErrorMessages.EMPTY)
                 .build();
-
         log.info("response создан: {}", response);
+        return response;
+    }
 
-        try {
-            validationService.isValid(bindingResult);
-            log.info("Валидация запроса uid={} прошла успешно", request.getUid());
-
-            if ("123".equals(request.getUid())) {
-                throw new UnsupportedCodeException("uid = 123 не поддерживается");
-            }
-
-            // Модифицируем request и пересылаем его в Сервис 2
-            request.setSystemTime(DateTimeUtil.getCustomFormat().format(receivedTime));
-            log.info("systemTime в request заменён на время получения Сервисом 1: {}",
-                    request.getSystemTime());
-            modifySourceRequestService.modify(request);
-            modifySystemNameRequestService.modify(request);
-
-        } catch (ValidationFailedException e) {
-            log.error("ValidationFailedException: {}", e.getMessage());
-            response.setCode(Codes.FAILED);
-            response.setErrorCode(ErrorCodes.VALIDATION_EXCEPTION);
-            response.setErrorMessage(ErrorMessages.VALIDATION);
-            log.info("response изменён после ошибки валидации: {}", response);
-            return new ResponseEntity<>(response, HttpStatus.BAD_REQUEST);
-        } catch (UnsupportedCodeException e) {
-            log.error("UnsupportedCodeException: {}", e.getMessage());
-            response.setCode(Codes.FAILED);
-            response.setErrorCode(ErrorCodes.UNSUPPORTED_EXCEPTION);
-            response.setErrorMessage(ErrorMessages.UNSUPPORTED);
-            log.info("response изменён после UnsupportedCodeException: {}", response);
-            return new ResponseEntity<>(response, HttpStatus.BAD_REQUEST);
-        } catch (Exception e) {
-            log.error("Непредвиденная ошибка: {}", e.getMessage(), e);
-            response.setCode(Codes.FAILED);
-            response.setErrorCode(ErrorCodes.UNKNOWN_EXCEPTION);
-            response.setErrorMessage(ErrorMessages.UNKNOWN);
-            log.info("response изменён после непредвиденной ошибки: {}", response);
-            return new ResponseEntity<>(response, HttpStatus.INTERNAL_SERVER_ERROR);
+    // Годовая премия – всем, квартальная – только управленцам
+    private void calculateBonuses(Request request, Response response) {
+        if (request.getPosition() == null || request.getSalary() == null
+                || request.getBonus() == null || request.getWorkDays() == null) {
+            log.info("Данные для расчёта премии не переданы, премия не рассчитывается");
+            return;
         }
+        response.setAnnualBonus(annualBonusService.calculate(request.getPosition(),
+                request.getSalary(), request.getBonus(), request.getWorkDays()));
+        if (request.getPosition().isManager()) {
+            response.setQuarterlyBonus(annualBonusService.calculateQuarterlyBonus(request.getPosition(),
+                    request.getSalary(), request.getBonus(), request.getWorkDays()));
+        }
+        log.info("Премии рассчитаны: годовая = {}, квартальная = {}",
+                response.getAnnualBonus(), response.getQuarterlyBonus());
+    }
 
-        modifyResponseService.modify(response);
-        log.info("Итоговый response: {}", response);
+    // Модификация request и пересылка его в Сервис 2
+    private void forwardToService2(Request request, Date receivedTime) {
+        request.setSystemTime(DateTimeUtil.getCustomFormat().format(receivedTime));
+        modifySourceRequestService.modify(request);
+        modifySystemNameRequestService.modify(request);
+    }
 
-        return new ResponseEntity<>(response, HttpStatus.OK);
+    // Заполнение ответа при ошибке
+    private ResponseEntity<Response> error(Response response, ErrorCodes errorCode,
+                                           ErrorMessages errorMessage, HttpStatus status,
+                                           Exception e) {
+        log.error("{}: {}", e.getClass().getSimpleName(), e.getMessage());
+        response.setCode(Codes.FAILED);
+        response.setErrorCode(errorCode);
+        response.setErrorMessage(errorMessage);
+        log.info("response после ошибки: {}", response);
+        return new ResponseEntity<>(response, status);
     }
 }
